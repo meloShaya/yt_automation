@@ -46,10 +46,14 @@
             class="w-full border-2 border-blue-300 p-2 rounded-md focus:outline-none focus:border-blue-500"
           >
             <option value="g4f">g4f (Free)</option>
+            <option value="openrouter">OpenRouter (Free fallback)</option>
             <option value="gpt3.5-turbo">OpenAI GPT-3.5</option>
             <option value="gpt4">OpenAI GPT-4</option>
-            <option value="gemmini">Gemini Pro</option>
+            <option value="gemini">Gemini (env model)</option>
           </select>
+          <p class="text-xs text-gray-600">
+            Gemini uses the model name in `GEMINI_MODEL` from your `.env`.
+          </p>
           <label for="voice" class="text-blue-600">Voice</label>
           <select
             name="voice"
@@ -208,6 +212,12 @@
           class="bg-blue-500 hover:bg-blue-700 duration-100 linear text-white px-4 py-2 rounded-md"
         >
           Generate
+        </button>
+        <button
+          id="resumeButton"
+          class="bg-yellow-500 hover:bg-yellow-600 duration-100 linear text-white px-4 py-2 rounded-md"
+        >
+          Resume
         </button>
         <button
           id="cancelButton"

@@ -7,6 +7,7 @@ const youtubeToggle = document.querySelector("#youtubeUploadToggle");
 const useMusicToggle = document.querySelector("#useMusicToggle");
 const customPrompt = document.querySelector("#customPrompt");
 const generateButton = document.querySelector("#generateButton");
+const resumeButton = document.querySelector("#resumeButton");
 const cancelButton = document.querySelector("#cancelButton");
 
 const advancedOptionsToggle = document.querySelector("#advancedOptionsToggle");
@@ -48,6 +49,7 @@ const cancelGeneration = () => {
   // Enable generate button
   generateButton.disabled = false;
   generateButton.classList.remove("hidden");
+  resumeButton.classList.remove("hidden");
 };
 
 const generateVideo = () => {
@@ -55,6 +57,7 @@ const generateVideo = () => {
   // Disable button and change text
   generateButton.disabled = true;
   generateButton.classList.add("hidden");
+  resumeButton.classList.add("hidden");
 
   // Show cancel button
   cancelButton.classList.remove("hidden");
@@ -106,15 +109,42 @@ const generateVideo = () => {
       // Hide cancel button after generation is complete
       generateButton.disabled = false;
       generateButton.classList.remove("hidden");
+      resumeButton.classList.remove("hidden");
       cancelButton.classList.add("hidden");
     })
     .catch((error) => {
       alert("An error occurred. Please try again later.");
       console.log(error);
+      resumeButton.classList.remove("hidden");
+    });
+};
+
+const resumeGeneration = () => {
+  console.log("Resuming generation...");
+  resumeButton.disabled = true;
+
+  fetch("http://localhost:8080/api/resume", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      console.log(data);
+      alert(data.message);
+      resumeButton.disabled = false;
+    })
+    .catch((error) => {
+      alert("An error occurred. Please try again later.");
+      console.log(error);
+      resumeButton.disabled = false;
     });
 };
 
 generateButton.addEventListener("click", generateVideo);
+resumeButton.addEventListener("click", resumeGeneration);
 cancelButton.addEventListener("click", cancelGeneration);
 
 videoSubject.addEventListener("keyup", (event) => {

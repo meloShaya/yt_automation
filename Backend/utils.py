@@ -4,6 +4,8 @@ import json
 import random
 import logging
 import zipfile
+import shutil
+import stat
 import requests
 
 from termcolor import colored
@@ -11,6 +13,71 @@ from termcolor import colored
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
+
+
+def resolve_imagemagick_binary() -> str | None:
+    """
+    Resolve a valid ImageMagick binary path for the current OS.
+
+    Returns:
+        str | None: Absolute path to a usable ImageMagick binary, if found.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidates: list[str] = []
+    env_value = os.getenv("IMAGEMAGICK_BINARY")
+    if env_value:
+        candidates.append(env_value)
+        if not os.path.isabs(env_value):
+            candidates.append(os.path.join(repo_root, env_value))
+    local_candidates = [
+        os.path.join(repo_root, "magick"),
+        os.path.join(repo_root, "magick.AppImage"),
+    ]
+    if os.name == "nt":
+        local_candidates.append(os.path.join(repo_root, "magick.exe"))
+
+    for path in local_candidates:
+        if path not in candidates:
+            candidates.append(path)
+
+    path_binary = shutil.which("magick")
+    if path_binary:
+        candidates.append(path_binary)
+    if os.name == "nt":
+        path_binary = shutil.which("magick.exe")
+        if path_binary:
+            candidates.append(path_binary)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = _normalize_path(candidate)
+        if os.name != "nt" and normalized.lower().endswith(".exe"):
+            continue
+        if os.path.isfile(normalized):
+            if os.name != "nt" and not os.access(normalized, os.X_OK):
+                try:
+                    st = os.stat(normalized)
+                    os.chmod(normalized, st.st_mode | stat.S_IXUSR)
+                except Exception:
+                    logger.warning(
+                        colored(
+                            f"ImageMagick binary is not executable: {normalized}",
+                            "yellow",
+                        )
+                    )
+            if os.name == "nt" or os.access(normalized, os.X_OK):
+                os.environ["IMAGEMAGICK_BINARY"] = normalized
+                logger.info(
+                    colored(f"Using ImageMagick binary: {normalized}", "green")
+                )
+                return normalized
+
+    return None
 
 
 def clean_dir(path: str) -> None:
@@ -104,15 +171,27 @@ def check_env_vars() -> None:
         SystemExit: If any required environment variables are missing.
     """
     try:
-        required_vars = ["PEXELS_API_KEY", "TIKTOK_SESSION_ID", "IMAGEMAGICK_BINARY"]
-        missing_vars = [var + os.getenv(var)  for var in required_vars if os.getenv(var) is None or (len(os.getenv(var)) == 0)]  
+        required_vars = ["PEXELS_API_KEY", "TIKTOK_SESSION_ID"]
+        missing_vars = [
+            var for var in required_vars if os.getenv(var) is None or len(os.getenv(var)) == 0
+        ]
+
+        imagemagick_binary = resolve_imagemagick_binary()
+        if not imagemagick_binary:
+            missing_vars.append("IMAGEMAGICK_BINARY")
 
         if missing_vars:
             missing_vars_str = ", ".join(missing_vars)
             logger.error(colored(f"The following environment variables are missing: {missing_vars_str}", "red"))
+            if "IMAGEMAGICK_BINARY" in missing_vars:
+                logger.error(
+                    colored(
+                        "On Linux, set IMAGEMAGICK_BINARY to the AppImage path (for example: ./magick) and ensure it is executable (chmod +x magick).",
+                        "yellow",
+                    )
+                )
             logger.error(colored("Please consult 'EnvironmentVariables.md' for instructions on how to set them.", "yellow"))
             sys.exit(1)  # Aborts the program
     except Exception as e:
         logger.error(f"Error occurred while checking environment variables: {str(e)}")
         sys.exit(1)  # Aborts the program if an unexpected error occurs
-

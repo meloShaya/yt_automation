@@ -6,6 +6,7 @@ import openai
 import google.generativeai as genai
 
 from g4f.client import Client
+from openai import OpenAI
 from termcolor import colored
 from dotenv import load_dotenv
 from typing import Tuple, List
@@ -16,8 +17,63 @@ load_dotenv("../.env")
 # Set environment variables
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 openai.api_key = OPENAI_API_KEY
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "MoneyPrinter")
+OPENROUTER_FREE_MODELS = [
+    "openai/gpt-oss-120b:free",
+    "openai/gpt-oss-20b:free",
+    "arcee-ai/trinity-large-preview:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "qwen3-4b:free",
+]
+
+_openrouter_headers = {}
+if OPENROUTER_SITE_URL:
+    _openrouter_headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+if OPENROUTER_APP_NAME:
+    _openrouter_headers["X-Title"] = OPENROUTER_APP_NAME
+
+OPENROUTER_CLIENT = None
+if OPENROUTER_API_KEY:
+    OPENROUTER_CLIENT = OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+        default_headers=_openrouter_headers or None,
+    )
+
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 genai.configure(api_key=GOOGLE_API_KEY)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def _ensure_g4f_cookies_file() -> str:
+    """
+    Ensure g4f cookies file exists for providers that require it.
+
+    Returns:
+        str: Path to the cookies file.
+    """
+    config_dir = os.path.join(os.path.expanduser("~"), ".config", "g4f")
+    cookies_path = os.path.join(config_dir, "cookies")
+    if not os.path.exists(cookies_path):
+        os.makedirs(config_dir, exist_ok=True)
+        with open(cookies_path, "w", encoding="utf-8"):
+            pass
+        print(
+            colored(
+                f"[!] g4f cookies file was missing and has been created at {cookies_path}.",
+                "yellow",
+            )
+        )
+        print(
+            colored(
+                "[!] If g4f still fails, add valid cookies for the provider or switch AI model.",
+                "yellow",
+            )
+        )
+    return cookies_path
 
 
 def generate_response(prompt: str, ai_model: str) -> str:
@@ -37,6 +93,7 @@ def generate_response(prompt: str, ai_model: str) -> str:
 
     if ai_model == 'g4f':
         # Newest G4F Architecture
+        _ensure_g4f_cookies_file()
         client = Client()
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -55,10 +112,31 @@ def generate_response(prompt: str, ai_model: str) -> str:
             messages=[{"role": "user", "content": prompt}],
 
         ).choices[0].message.content
-    elif ai_model == 'gemmini':
-        model = genai.GenerativeModel('gemini-pro')
+    elif ai_model in ["gemmini", "gemini"]:
+        model = genai.GenerativeModel(GEMINI_MODEL)
         response_model = model.generate_content(prompt)
         response = response_model.text
+    elif ai_model == "openrouter":
+        if OPENROUTER_CLIENT is None:
+            raise ValueError("OPENROUTER_API_KEY is not set.")
+
+        last_error = None
+        for model in OPENROUTER_FREE_MODELS:
+            try:
+                completion = OPENROUTER_CLIENT.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                response = completion.choices[0].message.content
+                if response:
+                    return response
+                raise ValueError("Empty response from model.")
+            except Exception as exc:
+                last_error = exc
+                print(colored(f"[!] OpenRouter model '{model}' failed: {exc}", "yellow"))
+                continue
+
+        raise RuntimeError("All OpenRouter models failed.") from last_error
 
     else:
 
@@ -95,18 +173,25 @@ def generate_script(video_subject: str, paragraph_number: int, ai_model: str, vo
         prompt = customPrompt
     else:
         prompt = """
-            Generate a script for a video, depending on the subject of the video.
 
-            The script is to be returned as a string with the specified number of paragraphs.
+            You are the official script writer for a viral YouTube Shorts channel that delivers soul-touching, poetic expressions of love — the kind that make viewers tear up, tag their person, and save the video forever.
 
-            Here is an example of a string:
-            "This is an example string."
+          Generate a perfect 20 to 30-second voiceover script for a romantic poetry Short.
 
-            Do not under any circumstance reference this prompt in your response.
+            The script must be raw spoken text ONLY. 
+            - paragraphs: (usually 1).
+            - Total 50-60 words (perfect for 20 seconds at a soft, emotional pace).
+            - Language: (natural, spoken, heartfelt version).
 
-            Get straight to the point, don't start with unnecessary things like, "welcome to this video".
+            Signature style (follow 100%):
+            - Tone: Deeply romantic, poetic, novel, and soul-stirring. Use beautiful metaphors, gentle rhythm, and original imagery that feels fresh and never cliché. Speak directly to "you" as if whispering to a lover. Make it feel intimate and timeless.
+            - Structure that crushes the algorithm:
+            • Start with the topic and immediately transform it into something poetic and heart-melting. Turn ordinary words (like "I love you") into something profound and unexpected. 
+            - I Repeat, start with the topic and immediately transform it into something poetic and heart-melting. 
+            - Never mention the channel, never say "in this Short", never add titles, emojis, or formatting.
+            - Make it highly shareable — every script should feel like something people want to send to their partner at 2 a.m.
 
-            Obviously, the script should be related to the subject of the video.
+            Now write the script straight away. Get straight to the point. Only return the raw paragraphs.
 
             YOU MUST NOT INCLUDE ANY TYPE OF MARKDOWN OR FORMATTING IN THE SCRIPT, NEVER USE A TITLE.
             YOU MUST WRITE THE SCRIPT IN THE LANGUAGE SPECIFIED IN [LANGUAGE].
@@ -201,25 +286,30 @@ def get_search_terms(video_subject: str, amount: int, script: str, ai_model: str
 
     # Parse response into a list of search terms
     search_terms = []
-    
+    raw_response = response
+
     try:
         search_terms = json.loads(response)
         if not isinstance(search_terms, list) or not all(isinstance(term, str) for term in search_terms):
             raise ValueError("Response is not a list of strings.")
 
     except (json.JSONDecodeError, ValueError):
-        # Get everything between the first and last square brackets
-        response = response[response.find("[") + 1:response.rfind("]")]
-
         print(colored("[*] GPT returned an unformatted response. Attempting to clean...", "yellow"))
 
-        # Attempt to extract list-like string and convert to list
-        match = re.search(r'\["(?:[^"\\]|\\.)*"(?:,\s*"[^"\\]*")*\]', response)
-        print(match.group())
+        # Try to extract a JSON array block from the original response
+        match = re.search(r'\[[\s\S]*\]', raw_response)
         if match:
             try:
                 search_terms = json.loads(match.group())
             except json.JSONDecodeError:
+                search_terms = []
+
+        # Fallback: extract quoted strings as terms
+        if not search_terms:
+            extracted_terms = re.findall(r'"([^"]+)"', raw_response)
+            if extracted_terms:
+                search_terms = extracted_terms
+            else:
                 print(colored("[-] Could not parse response.", "red"))
                 return []
 

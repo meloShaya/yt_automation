@@ -1,5 +1,6 @@
 import os
 import uuid
+import subprocess
 
 import requests
 import srt_equalizer
@@ -143,9 +144,85 @@ def generate_subtitles(audio_path: str, sentences: List[str], audio_clips: List[
     return subtitles_path
 
 
+def _process_clip_to_segment(video_path: str, target_duration: float, max_clip_duration: int, threads: int) -> tuple:
+    """
+    Process a single video clip (crop, resize, trim) and write it to a temp segment file.
+    Returns (segment_path, clip_duration). The clip is closed before returning.
+    """
+    segment_path = f"../temp/seg_{uuid.uuid4()}.mp4"
+    clip = VideoFileClip(video_path)
+    try:
+        clip = clip.without_audio()
+
+        # Trim to target duration
+        if target_duration < clip.duration:
+            clip = clip.subclip(0, target_duration)
+
+        clip = clip.set_fps(30)
+
+        # Crop to 9:16 aspect ratio
+        if round((clip.w / clip.h), 4) < 0.5625:
+            clip = crop(clip, width=clip.w, height=round(clip.w / 0.5625),
+                        x_center=clip.w / 2, y_center=clip.h / 2)
+        else:
+            clip = crop(clip, width=round(0.5625 * clip.h), height=clip.h,
+                        x_center=clip.w / 2, y_center=clip.h / 2)
+
+        clip = clip.resize((1080, 1920))
+
+        if clip.duration > max_clip_duration:
+            clip = clip.subclip(0, max_clip_duration)
+
+        duration = clip.duration
+        clip.write_videofile(
+            segment_path,
+            threads=threads,
+            preset="ultrafast",
+            logger=None,
+        )
+    finally:
+        clip.close()
+
+    return segment_path, duration
+
+
+def _ffmpeg_concat(segment_paths: List[str], output_path: str) -> None:
+    """
+    Concatenate video segments using ffmpeg concat demuxer.
+    This streams from disk with near-zero RAM usage and does not re-encode.
+    """
+    concat_list_path = f"../temp/concat_{uuid.uuid4()}.txt"
+    try:
+        with open(concat_list_path, "w") as f:
+            for seg in segment_paths:
+                # ffmpeg concat demuxer requires absolute or properly escaped paths
+                abs_path = os.path.abspath(seg)
+                f.write(f"file '{abs_path}'\n")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c", "copy",
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(colored(f"[!] ffmpeg concat stderr: {result.stderr[-500:]}", "yellow"))
+            raise RuntimeError(f"ffmpeg concat failed (exit {result.returncode})")
+    finally:
+        if os.path.exists(concat_list_path):
+            os.remove(concat_list_path)
+
+
 def combine_videos(video_paths: List[str], max_duration: int, max_clip_duration: int, threads: int) -> str:
     """
     Combines a list of videos into one video and returns the path to the combined video.
+
+    Uses a memory-efficient approach: each clip is processed individually and written
+    to a temp file (only 1 clip in RAM at a time), then joined via ffmpeg concat demuxer
+    which streams from disk with near-zero memory usage.
 
     Args:
         video_paths (List): A list of paths to the videos to combine.
@@ -165,42 +242,41 @@ def combine_videos(video_paths: List[str], max_duration: int, max_clip_duration:
     print(colored("[+] Combining videos...", "blue"))
     print(colored(f"[+] Each clip will be maximum {req_dur} seconds long.", "blue"))
 
-    clips = []
+    segment_files = []
     tot_dur = 0
-    # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
-    while tot_dur < max_duration:
-        for video_path in video_paths:
-            clip = VideoFileClip(video_path)
-            clip = clip.without_audio()
-            # Check if clip is longer than the remaining audio
-            if (max_duration - tot_dur) < clip.duration:
-                clip = clip.subclip(0, (max_duration - tot_dur))
-            # Only shorten clips if the calculated clip length (req_dur) is shorter than the actual clip to prevent still image
-            elif req_dur < clip.duration:
-                clip = clip.subclip(0, req_dur)
-            clip = clip.set_fps(30)
 
-            # Not all videos are same size,
-            # so we need to resize them
-            if round((clip.w/clip.h), 4) < 0.5625:
-                clip = crop(clip, width=clip.w, height=round(clip.w/0.5625), \
-                            x_center=clip.w / 2, \
-                            y_center=clip.h / 2)
-            else:
-                clip = crop(clip, width=round(0.5625*clip.h), height=clip.h, \
-                            x_center=clip.w / 2, \
-                            y_center=clip.h / 2)
-            clip = clip.resize((1080, 1920))
+    try:
+        # Process clips one at a time — only 1 clip in RAM at any moment
+        while tot_dur < max_duration:
+            for video_path in video_paths:
+                remaining = max_duration - tot_dur
+                if remaining <= 0:
+                    break
 
-            if clip.duration > max_clip_duration:
-                clip = clip.subclip(0, max_clip_duration)
+                target_dur = min(req_dur, remaining)
 
-            clips.append(clip)
-            tot_dur += clip.duration
+                print(colored(f"[+] Processing segment {len(segment_files) + 1} ({target_dur:.1f}s)...", "blue"))
+                seg_path, actual_dur = _process_clip_to_segment(
+                    video_path, target_dur, max_clip_duration, threads
+                )
+                segment_files.append(seg_path)
+                tot_dur += actual_dur
 
-    final_clip = concatenate_videoclips(clips)
-    final_clip = final_clip.set_fps(30)
-    final_clip.write_videofile(combined_video_path, threads=threads)
+                if tot_dur >= max_duration:
+                    break
+
+        # Join all segments via ffmpeg (streams from disk, near-zero RAM)
+        print(colored(f"[+] Joining {len(segment_files)} segments...", "blue"))
+        _ffmpeg_concat(segment_files, combined_video_path)
+
+    finally:
+        # Clean up temp segment files
+        for seg in segment_files:
+            try:
+                if os.path.exists(seg):
+                    os.remove(seg)
+            except Exception:
+                pass
 
     return combined_video_path
 
@@ -232,17 +308,32 @@ def generate_video(combined_video_path: str, tts_path: str, subtitles_path: str,
     # Split the subtitles position into horizontal and vertical
     horizontal_subtitles_position, vertical_subtitles_position = subtitles_position.split(",")
 
-    # Burn the subtitles into the video
-    subtitles = SubtitlesClip(subtitles_path, generator)
-    result = CompositeVideoClip([
-        VideoFileClip(combined_video_path),
-        subtitles.set_pos((horizontal_subtitles_position, vertical_subtitles_position))
-    ])
+    video_clip = None
+    subtitles = None
+    result = None
+    audio = None
 
-    # Add the audio
-    audio = AudioFileClip(tts_path)
-    result = result.set_audio(audio)
+    try:
+        # Burn the subtitles into the video
+        subtitles = SubtitlesClip(subtitles_path, generator)
+        video_clip = VideoFileClip(combined_video_path)
+        result = CompositeVideoClip([
+            video_clip,
+            subtitles.set_pos((horizontal_subtitles_position, vertical_subtitles_position))
+        ])
 
-    result.write_videofile("../temp/output.mp4", threads=threads or 2)
+        # Add the audio
+        audio = AudioFileClip(tts_path)
+        result = result.set_audio(audio)
+
+        result.write_videofile("../temp/output.mp4", threads=threads or 2)
+    finally:
+        # Close all clips to free memory and file handles
+        for clip_obj in [result, subtitles, video_clip, audio]:
+            if clip_obj is not None:
+                try:
+                    clip_obj.close()
+                except Exception:
+                    pass
 
     return "output.mp4"
