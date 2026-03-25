@@ -410,18 +410,34 @@ def run_generation(data: dict, resume_state: dict | None = None):
                 song_clip = None
                 original_audio = None
                 video_clip = None
+                temp_output_path = final_video_disk_path.replace(".mp4", "_music.mp4")
                 try:
                     song_path = choose_random_song()
                     song_clip = AudioFileClip(song_path)
                     original_audio = AudioFileClip(tts_path)
                     original_duration = original_audio.duration
-                    song_clip = song_clip.set_duration(original_duration)
+                    
+                    # Loop the audio to repeat if the video is longer, and drop volume
+                    from moviepy.audio.fx.all import audio_loop
+                    song_clip = audio_loop(song_clip, duration=original_duration)
+                    song_clip = song_clip.volumex(0.3)
+                    
                     video_clip = VideoFileClip(final_video_disk_path)
                     comp_audio = CompositeAudioClip([original_audio, song_clip])
                     video_clip = video_clip.set_audio(comp_audio)
                     video_clip = video_clip.set_fps(30)
                     video_clip = video_clip.set_duration(original_duration)
-                    video_clip.write_videofile(final_video_disk_path, threads=n_threads or 1)
+                    video_clip.write_videofile(temp_output_path, threads=n_threads or 1)
+                    
+                    # Close clips early to release file lock on Windows
+                    video_clip.close()
+                    original_audio.close()
+                    song_clip.close()
+                    
+                    import shutil
+                    if os.path.exists(temp_output_path):
+                        shutil.move(temp_output_path, final_video_disk_path)
+                        
                     state["music_applied"] = True
                     state["stage"] = "music"
                     save_job_state(state)
